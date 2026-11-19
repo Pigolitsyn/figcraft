@@ -55,6 +55,11 @@ fn box_blur_row(src: &[[u8; 4]], dst: &mut [[u8; 4]], r: usize) {
         return;
     }
     let div = (2 * r + 1) as u32;
+    // A window sum is at most `255 * div`, and no radius a blur can ask for widens `div` past the
+    // point where `255 * div * div` outgrows 2^52 (`box_sizes(MAX_SIGMA)`'s widest is 2 * 10^6 + 1).
+    // There `(sum * ceil(2^52 / div)) >> 52` is exactly `sum / div`, one multiply instead of a
+    // hardware division per channel (checked by `reciprocal_matches_division`).
+    let inv = ((1u64 << 52) + u64::from(div) - 1) / u64::from(div);
     let mut acc = [0u32; 4];
     for p in src.iter().take(r + 1) {
         for (a, c) in acc.iter_mut().zip(p) {
@@ -62,7 +67,7 @@ fn box_blur_row(src: &[[u8; 4]], dst: &mut [[u8; 4]], r: usize) {
         }
     }
     for (x, d) in dst.iter_mut().enumerate() {
-        *d = acc.map(|a| (a / div) as u8);
+        *d = acc.map(|a| ((u64::from(a) * inv) >> 52) as u8);
         if let Some(p) = src.get(x + r + 1) {
             for (a, c) in acc.iter_mut().zip(p) {
                 *a += u32::from(*c);
@@ -517,6 +522,38 @@ mod tests {
         for s in [0.5, 1.0, 4.0, 50.0] {
             let b = box_sizes(s);
             assert!(b.iter().all(|r| *r < 1000));
+        }
+    }
+
+    #[test]
+    fn reciprocal_matches_division() {
+        // The widest window a blur can ask for, from `box_sizes(MAX_SIGMA)`, and small ones.
+        for d in [3u32, 5, 39, 121, 1001, 10001, 640001, 2_000_001] {
+            let inv = ((1u64 << 52) + u64::from(d) - 1) / u64::from(d);
+            for q in 0..=255u32 {
+                for k in [1u32, 2, d - 2, d - 1] {
+                    let a = q * d + k;
+                    if a <= 255 * d {
+                        assert_eq!(((u64::from(a) * inv) >> 52) as u32, a / d, "d={d} a={a}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn box_blur_matches_a_naive_window() {
+        let r = 7;
+        let src: Vec<[u8; 4]> = (0..64u8).map(|v| [v, v / 2, v / 3, 255]).collect();
+        let mut dst = vec![[0u8; 4]; src.len()];
+        box_blur_row(&src, &mut dst, r);
+        let div = (2 * r + 1) as u32;
+        for (x, got) in dst.iter().enumerate() {
+            let (lo, hi) = (x.saturating_sub(r), (x + r).min(src.len() - 1));
+            for c in 0..4 {
+                let sum: u32 = src[lo..=hi].iter().map(|p| u32::from(p[c])).sum();
+                assert_eq!(u32::from(got[c]), sum / div, "x={x} c={c}");
+            }
         }
     }
 }
