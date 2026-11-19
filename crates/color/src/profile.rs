@@ -6,6 +6,8 @@
 //! primaries matrices (derived here from the published chromaticities) and re-encodes. Colours a
 //! smaller space can't hold are clipped per channel.
 
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Color;
@@ -136,22 +138,34 @@ impl ProfileConversion {
     /// Convert premultiplied 8-bit RGBA pixels in place (table-driven; a no-op for the identity).
     pub fn apply_pixels(&self, rgba: &mut [u8]) {
         let Some(m) = &self.m else { return };
-        let to_linear: [f32; 256] = std::array::from_fn(|i| decode(i as f32 / 255.0) as f32);
-        let to_encoded: Vec<u8> = (0..ENCODE_STEPS).map(|i| (encode(i as f64 / (ENCODE_STEPS - 1) as f64) * 255.0).round() as u8).collect();
+        let to_linear = linear_table();
+        let to_encoded = encoded_table();
         let m = m.map(|row| row.map(|v| v as f32));
-        let lin = |v: u8| to_linear.get(usize::from(v)).copied().unwrap_or(0.0);
-        let enc = |l: f32| to_encoded.get((l.clamp(0.0, 1.0) * (ENCODE_STEPS - 1) as f32).round() as usize).copied().unwrap_or(0);
+        // `l` is clamped to 0..=1, so rounding half up is `+ 0.5` and a truncation: no `round`.
+        let enc = |l: f32| to_encoded[((l.clamp(0.0, 1.0) * (ENCODE_STEPS - 1) as f32 + 0.5) as usize).min(ENCODE_STEPS - 1)];
         for [r, g, b, a] in rgba.as_chunks_mut::<4>().0.iter_mut() {
             if *a == 0 {
                 continue;
             }
             let alpha = u32::from(*a);
-            let v = [lin(straight(*r, *a)), lin(straight(*g, *a)), lin(straight(*b, *a))];
+            let v = [to_linear[usize::from(straight(*r, *a))], to_linear[usize::from(straight(*g, *a))], to_linear[usize::from(straight(*b, *a))]];
             let out = m.map(|row| enc(row[0] * v[0] + row[1] * v[1] + row[2] * v[2]));
             let premul = |c: u8| if alpha == 255 { c } else { ((u32::from(c) * alpha + 127) / 255) as u8 };
             (*r, *g, *b) = (premul(out[0]), premul(out[1]), premul(out[2]));
         }
     }
+}
+
+/// Encoded 8-bit values → linear light, built once (the tables every pixel would rebuild).
+fn linear_table() -> &'static [f32; 256] {
+    static TABLE: OnceLock<[f32; 256]> = OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|i| decode(i as f32 / 255.0) as f32))
+}
+
+/// Linear light → encoded 8-bit values, built once.
+fn encoded_table() -> &'static [u8; ENCODE_STEPS] {
+    static TABLE: OnceLock<[u8; ENCODE_STEPS]> = OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|i| (encode(i as f64 / (ENCODE_STEPS - 1) as f64) * 255.0).round() as u8))
 }
 
 /// A premultiplied 8-bit channel without its alpha (`a` > 0).
