@@ -137,7 +137,8 @@ pub fn points(app: &mut FigApp, ui: &mut Ui, doc: &Document, ve: &VectorEdit) {
     }
     let vertex = |v: &usize| net.vertices.get(*v).copied();
     let radius = same(pts.iter().map(|v| vertex(v).map(|x| x.radius))).flatten();
-    let mirror = same(pts.iter().map(|v| net.mirroring(*v)));
+    let mirroring = net.mirroring_of(&pts);
+    let mirror = same(pts.iter().map(|v| mirroring.get(v).copied().unwrap_or(HandleMirroring::None)));
     // A point's own cap and join (`Some(None)`: the layer's; `None`: mixed).
     let cap = same(pts.iter().map(|v| vertex(v).map(|x| x.cap))).flatten();
     let join = same(pts.iter().map(|v| vertex(v).map(|x| x.join))).flatten();

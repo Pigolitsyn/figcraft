@@ -892,7 +892,13 @@ pub fn specs() -> Vec<CommandSpec> {
             let doc = s.doc()?;
             let o = overlay(doc, &ve).map(|o| serde_json::to_value(o).unwrap_or(Value::Null)).unwrap_or(Value::Null);
             let net = network(doc, ve.id).map(|n| serde_json::to_value(n).unwrap_or(Value::Null)).unwrap_or(Value::Null);
-            let mirroring: Vec<&str> = network(doc, ve.id).map(|n| (0..n.vertices.len()).map(|v| n.mirroring(v).id()).collect()).unwrap_or_default();
+            let mirroring: Vec<&str> = network(doc, ve.id)
+                .map(|n| {
+                    let all: Vec<usize> = (0..n.vertices.len()).collect();
+                    let m = n.mirroring_of(&all);
+                    all.iter().map(|v| m.get(v).copied().unwrap_or_default().id()).collect()
+                })
+                .unwrap_or_default();
             let layers: Vec<NodeId> = ve.parts().iter().map(|p| p.id).collect();
             let others: Vec<Value> = ve.others.iter().map(|o| json!({"id": o.id, "vertices": o.vertices, "segments": o.segments})).collect();
             Ok(json!({"id": ve.id, "tool": ve.tool.id(), "overlay": o, "network": net, "mirroring": mirroring,

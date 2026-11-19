@@ -349,11 +349,32 @@ impl VectorNetwork {
     /// The vertex's handle mirroring: its explicit setting, else inferred from its two handles
     /// (opposite and equal → angle and length, opposite → angle, otherwise none).
     pub fn mirroring(&self, v: usize) -> HandleMirroring {
+        self.mirroring_with(v, &self.incident(v))
+    }
+
+    /// The mirroring of each of `verts`, in one pass over the segments: asking for them one by one
+    /// walks every segment each time, which is quadratic on a busy path.
+    pub fn mirroring_of(&self, verts: &[usize]) -> std::collections::BTreeMap<usize, HandleMirroring> {
+        let mut incident: std::collections::BTreeMap<usize, Vec<(usize, bool)>> = verts.iter().map(|v| (*v, Vec::new())).collect();
+        for (i, seg) in self.segments.iter().enumerate() {
+            if let Some(list) = incident.get_mut(&seg.a) {
+                list.push((i, true));
+            }
+            if seg.b != seg.a
+                && let Some(list) = incident.get_mut(&seg.b)
+            {
+                list.push((i, false));
+            }
+        }
+        incident.into_iter().map(|(v, list)| (v, self.mirroring_with(v, &list))).collect()
+    }
+
+    /// [`Self::mirroring`] for incident segments already known.
+    fn mirroring_with(&self, v: usize, inc: &[(usize, bool)]) -> HandleMirroring {
         if let Some(m) = self.vertices.get(v).and_then(|x| x.mirror) {
             return m;
         }
-        let inc = self.incident(v);
-        let [(s1, a1), (s2, a2)] = inc.as_slice() else { return HandleMirroring::None };
+        let [(s1, a1), (s2, a2)] = inc else { return HandleMirroring::None };
         let (Some(h1), Some(h2)) = (self.handle(*s1, *a1), self.handle(*s2, *a2)) else { return HandleMirroring::None };
         let (l1, l2) = (h1.0.hypot(h1.1), h2.0.hypot(h2.1));
         if l1 < 1e-9 || l2 < 1e-9 {
