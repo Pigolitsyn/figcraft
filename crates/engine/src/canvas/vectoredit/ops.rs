@@ -846,14 +846,35 @@ pub fn in_polygon(points: &[Point], poly: &[Point]) -> Vec<usize> {
     if poly.len() < 3 {
         return vec![];
     }
+    let n = poly.len();
+    // An edge can only cross a point's row when it spans it, so bucket the edges by the rows they
+    // reach: each point then tests the few its row holds, with the same crossing rule as before.
+    const BANDS: usize = 256;
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for v in poly {
+        lo = lo.min(v.y);
+        hi = hi.max(v.y);
+    }
+    let rows = (hi - lo).max(f64::MIN_POSITIVE);
+    let band = |y: f64| (((y - lo) / rows) * BANDS as f64).clamp(0.0, (BANDS - 1) as f64) as usize;
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); BANDS];
+    for k in 0..n {
+        let (a, b) = (&poly[k], &poly[(k + 1) % n]);
+        let (first, last) = (band(a.y.min(b.y)), band(a.y.max(b.y)));
+        for bucket in &mut buckets[first..=last] {
+            bucket.push(k as u32);
+        }
+    }
     points
         .iter()
         .enumerate()
         .filter(|(_, p)| {
+            if !(p.y >= lo && p.y <= hi) {
+                return false;
+            }
             let mut inside = false;
-            let n = poly.len();
-            for k in 0..n {
-                let (Some(a), Some(b)) = (poly.get(k), poly.get((k + 1) % n)) else { continue };
+            for &k in &buckets[band(p.y)] {
+                let (a, b) = (&poly[k as usize], &poly[(k as usize + 1) % n]);
                 if (a.y > p.y) != (b.y > p.y) {
                     let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
                     if p.x < x {
@@ -964,6 +985,79 @@ pub fn erase(net: &mut VectorNetwork, c: Point, r: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The old way: every vertex against every edge.
+    fn in_polygon_naive(points: &[Point], poly: &[Point]) -> Vec<usize> {
+        if poly.len() < 3 {
+            return vec![];
+        }
+        points
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                let mut inside = false;
+                let n = poly.len();
+                for k in 0..n {
+                    let (Some(a), Some(b)) = (poly.get(k), poly.get((k + 1) % n)) else { continue };
+                    if (a.y > p.y) != (b.y > p.y) {
+                        let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                        if p.x < x {
+                            inside = !inside;
+                        }
+                    }
+                }
+                inside
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// A lasso and the vertices of a busy path over the same area.
+    fn lasso_case(edges: usize, pts: usize) -> (Vec<Point>, Vec<Point>) {
+        let poly = (0..edges)
+            .map(|i| {
+                let a = i as f64 / edges as f64 * std::f64::consts::TAU;
+                Point::new(500.0 + 480.0 * a.cos(), 500.0 + 480.0 * a.sin())
+            })
+            .collect();
+        let points = (0..pts).map(|i| Point::new((i * 37 % 1000) as f64, (i * 91 % 1000) as f64)).collect();
+        (points, poly)
+    }
+
+    /// The row buckets answer exactly what testing every edge does, including on points on the
+    /// lasso's own rows and far outside it.
+    #[test]
+    fn in_polygon_matches_testing_every_edge() {
+        let shapes: [[(f64, f64); 5]; 3] = [
+            [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (0.0, 0.0)],
+            [(10.0, 40.0), (60.0, 5.0), (95.0, 70.0), (45.0, 120.0), (5.0, 85.0)],
+            [(0.0, 50.0), (50.0, 50.0), (100.0, 50.0), (60.0, 51.0), (40.0, 49.0)],
+        ];
+        for shape in shapes {
+            let poly: Vec<Point> = shape.iter().map(|(x, y)| Point::new(*x, *y)).collect();
+            let mut points = Vec::new();
+            for i in 0..=40 {
+                for j in 0..=40 {
+                    points.push(Point::new(i as f64 * 2.5, j as f64 * 3.0));
+                }
+            }
+            for (x, y) in [(0.0, 50.0), (100.0, 50.0), (50.0, 50.0), (-10.0, -10.0), (200.0, 200.0)] {
+                points.push(Point::new(x, y));
+            }
+            assert_eq!(in_polygon(&points, &poly), in_polygon_naive(&points, &poly), "{shape:?}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn lasso_timings() {
+        for (edges, pts) in [(200usize, 5_000usize), (1_000, 20_000)] {
+            let (points, poly) = lasso_case(edges, pts);
+            let t = std::time::Instant::now();
+            let inside = in_polygon(&points, &poly).len();
+            println!("lasso {edges} edges x {pts} points: {:.1} ms ({inside} inside)", t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
     use super::*;
 
     fn square() -> VectorNetwork {
