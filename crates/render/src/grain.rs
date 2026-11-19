@@ -33,6 +33,8 @@ fn unit(h: u64, at: u32) -> f32 {
 /// in the next cell; rounded, the edge moves 1 / 2²¹ of a cell aside, off the centres layers at
 /// round positions and zooms put it on.
 const STEPS_PER_CELL: f64 = 1_048_576.0;
+/// `1 / STEPS_PER_CELL` exactly (a power of two), so scaling back is a multiply.
+const INV_STEPS_PER_CELL: f64 = 1.0 / 1_048_576.0;
 
 /// Maps layer pixels to the grain cells under their centres.
 struct Cells {
@@ -52,7 +54,15 @@ impl Cells {
     fn at(&self, x: u32, y: u32) -> (i64, i64) {
         let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
         let [a, b, c, d, e, f] = self.m;
-        let cell = |v: f64| ((v * STEPS_PER_CELL).round() / STEPS_PER_CELL).floor() as i64;
+        // Dividing by `STEPS_PER_CELL` (a power of two) is the same as multiplying by its inverse,
+        // exactly: one multiply instead of a divide per axis.
+        // `floor(round(v * STEPS) / STEPS)`: the scaled value is an integer below 2^52, so cutting
+        // its low bits (an arithmetic shift) is the same as dividing by the power of two and
+        // flooring; past that the product may not be an integer any more, and the long way runs.
+        let cell = |v: f64| {
+            let scaled = (v * STEPS_PER_CELL).round();
+            if scaled.abs() < 4.5e15 { (scaled as i64) >> 20 } else { (scaled * INV_STEPS_PER_CELL).floor() as i64 }
+        };
         (cell(a * px + c * py + e), cell(b * px + d * py + f))
     }
 }
@@ -124,14 +134,24 @@ pub fn texture(layer: &mut Pixmap, t: &Texture, xf: Affine, scale: f64, seed: u3
     let src = layer.data().to_vec();
     let dst = layer.data_mut();
     for y in 0..h {
+        // A grain's move depends on its cell alone, and a row crosses few cells (one row of a big
+        // grain crosses one): work it out when the cell changes, not for every pixel in it.
+        let mut last: Option<(i64, i64, i64, i64)> = None;
         for x in 0..w {
             let (ix, iy) = cells.at(x, y);
-            let hv = hash(ix, iy, seed ^ 0x7E57_u32);
-            // A uniform point in the disc of radius r.
-            let (ang, dist) = (unit(hv, 0) * std::f32::consts::TAU, unit(hv, 16).sqrt() * r);
-            // The move in whole pixels, apart from `x` and `y`: the same pixel of the page moves
-            // the same way wherever the layer's pixels start.
-            let (mx, my) = ((0.5 + ang.cos() * dist).floor() as i64, (0.5 + ang.sin() * dist).floor() as i64);
+            let (mx, my) = match last {
+                Some((lx, ly, mx, my)) if lx == ix && ly == iy => (mx, my),
+                _ => {
+                    let hv = hash(ix, iy, seed ^ 0x7E57_u32);
+                    // A uniform point in the disc of radius r.
+                    let (ang, dist) = (unit(hv, 0) * std::f32::consts::TAU, unit(hv, 16).sqrt() * r);
+                    // The move in whole pixels, apart from `x` and `y`: the same pixel of the page
+                    // moves the same way wherever the layer's pixels start.
+                    let m = ((0.5 + ang.cos() * dist).floor() as i64, (0.5 + ang.sin() * dist).floor() as i64);
+                    last = Some((ix, iy, m.0, m.1));
+                    m
+                }
+            };
             let (fx, fy) = (i64::from(x) + mx, i64::from(y) + my);
             let i = ((y * w + x) * 4) as usize;
             let mut px = [0u8; 4];
